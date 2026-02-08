@@ -1,0 +1,23 @@
+# Secrets
+secrets.yaml
+
+# ESPHome build artifacts
+.esphome/
+
+# PlatformIO build artifacts
+.pio/
+
+# Debug/test audio files
+*.wav
+*.mp3
+*.pcm
+
+# Claude Code settings
+.claude/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
