@@ -1,0 +1,4 @@
+aiohttp
+pydub
+pyyaml
+opuslib

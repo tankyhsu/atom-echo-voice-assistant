@@ -7,6 +7,20 @@ secrets.yaml
 # PlatformIO build artifacts
 .pio/
 
+# ESP-IDF managed components (auto-downloaded)
+managed_components/
+
+# ESP-IDF auto-generated config
+sdkconfig
+sdkconfig.m5stack-atom
+sdkconfig.old
+
+# Backup files
+*.bak
+
+# ESP-IDF build
+build/
+
 # Debug/test audio files
 *.wav
 *.mp3
@@ -21,3 +35,6 @@ secrets.yaml
 # Python
 __pycache__/
 *.pyc
+
+# Transcripts
+*.jsonl
