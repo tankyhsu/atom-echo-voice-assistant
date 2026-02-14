@@ -50,8 +50,15 @@
 #define SAMPLE_RATE 24000
 
 // ========== WiFi Config ==========
-#define WIFI_SSID     "oasis"
-#define WIFI_PASSWORD "0a5is402"
+// WiFi networks (tried in order)
+struct WiFiCredential { const char* ssid; const char* password; };
+static const WiFiCredential wifi_list[] = {
+    {"oasis",  "0a5is402"},
+    {"laotie", "qty19541226"},
+};
+static int wifi_index = 0;
+static int wifi_retry = 0;
+#define WIFI_MAX_RETRY 3
 #define BACKEND_IP    "192.168.31.165"
 
 // WebSocket URI
@@ -175,6 +182,22 @@ static void i2c_init() {
 }
 
 // ========== WiFi ==========
+static void wifi_try_next() {
+    wifi_retry++;
+    if (wifi_retry >= WIFI_MAX_RETRY) {
+        wifi_retry = 0;
+        wifi_index = (wifi_index + 1) % (sizeof(wifi_list) / sizeof(wifi_list[0]));
+    }
+    const auto& cred = wifi_list[wifi_index];
+    ESP_LOGW(TAG, "WiFi trying %s (attempt %d/%d)", cred.ssid, wifi_retry + 1, WIFI_MAX_RETRY);
+
+    wifi_config_t cfg = {};
+    strncpy((char*)cfg.sta.ssid, cred.ssid, sizeof(cfg.sta.ssid));
+    strncpy((char*)cfg.sta.password, cred.password, sizeof(cfg.sta.password));
+    esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    esp_wifi_connect();
+}
+
 static void wifi_event_handler(void* arg, esp_event_base_t base,
                                int32_t id, void* data) {
     if (base == WIFI_EVENT) {
@@ -182,13 +205,15 @@ static void wifi_event_handler(void* arg, esp_event_base_t base,
             esp_wifi_connect();
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             wifi_connected = false;
-            ESP_LOGW(TAG, "WiFi disconnected, reconnecting...");
-            esp_wifi_connect();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            wifi_try_next();
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*)data;
-        ESP_LOGI(TAG, "WiFi connected, IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "WiFi connected to %s, IP: " IPSTR,
+                 wifi_list[wifi_index].ssid, IP2STR(&event->ip_info.ip));
         wifi_connected = true;
+        wifi_retry = 0;
     }
 }
 
@@ -204,13 +229,13 @@ static void wifi_init() {
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
 
     wifi_config_t wifi_cfg = {};
-    strncpy((char*)wifi_cfg.sta.ssid, WIFI_SSID, sizeof(wifi_cfg.sta.ssid));
-    strncpy((char*)wifi_cfg.sta.password, WIFI_PASSWORD, sizeof(wifi_cfg.sta.password));
+    strncpy((char*)wifi_cfg.sta.ssid, wifi_list[0].ssid, sizeof(wifi_cfg.sta.ssid));
+    strncpy((char*)wifi_cfg.sta.password, wifi_list[0].password, sizeof(wifi_cfg.sta.password));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "WiFi connecting to %s...", WIFI_SSID);
+    ESP_LOGI(TAG, "WiFi connecting to %s...", wifi_list[0].ssid);
 }
 
 // ========== Notification Sounds (gentle, low-volume) ==========
