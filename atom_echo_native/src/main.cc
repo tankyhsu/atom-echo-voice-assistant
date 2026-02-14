@@ -52,7 +52,7 @@
 // ========== WiFi Config ==========
 #define WIFI_SSID     "oasis"
 #define WIFI_PASSWORD "0a5is402"
-#define BACKEND_IP    "192.168.31.193"
+#define BACKEND_IP    "192.168.31.165"
 
 // WebSocket URI
 #define WS_URI "ws://" BACKEND_IP ":8765"
@@ -65,6 +65,16 @@ static AudioService* audio_svc = nullptr;
 static WsTransport* ws = nullptr;
 
 static volatile bool wifi_connected = false;
+
+// Processing state — blocks recording while LLM/TTS is active
+static volatile bool processing = false;
+
+// Notification sound queue (set by WS callback, consumed by main loop)
+// 0=none, 1=thinking, 2=tool_call, 3=tool_result
+static volatile int pending_notification = 0;
+
+// Set by WS callback to tell main loop to close notification output ASAP
+static volatile bool close_notif_output = false;
 
 // ========== PI4IOE I/O Expander ==========
 static void pi4ioe_write_reg(uint8_t reg, uint8_t val) {
@@ -203,6 +213,82 @@ static void wifi_init() {
     ESP_LOGI(TAG, "WiFi connecting to %s...", WIFI_SSID);
 }
 
+// ========== Notification Sounds (gentle, low-volume) ==========
+// Play a short sine tone with fade in/out. Very gentle.
+static void play_tone(float freq, int duration_ms, float amplitude = 2000.0f) {
+    const int sr = SAMPLE_RATE;
+    int total = sr * duration_ms / 1000;
+    int fade = total / 4;  // 25% fade in/out for smooth envelope
+    int16_t buf[240];
+    int offset = 0;
+    while (offset < total) {
+        int count = total - offset;
+        if (count > 240) count = 240;
+        for (int i = 0; i < count; i++) {
+            int idx = offset + i;
+            float env = 1.0f;
+            if (idx < fade) env = (float)idx / fade;
+            if (idx > total - fade) env = (float)(total - idx) / fade;
+            buf[i] = (int16_t)(sinf(2.0f * M_PI * freq * ((float)idx / sr)) * amplitude * env);
+        }
+        codec->WriteSamples(buf, count);
+        offset += count;
+    }
+}
+
+// Play a frequency sweep (for "tool done" rising tone)
+static void play_sweep(float freq_start, float freq_end, int duration_ms, float amplitude = 2000.0f) {
+    const int sr = SAMPLE_RATE;
+    int total = sr * duration_ms / 1000;
+    int fade = total / 4;
+    int16_t buf[240];
+    int offset = 0;
+    while (offset < total) {
+        int count = total - offset;
+        if (count > 240) count = 240;
+        for (int i = 0; i < count; i++) {
+            int idx = offset + i;
+            float t = (float)idx / total;
+            float freq = freq_start + (freq_end - freq_start) * t;
+            float env = 1.0f;
+            if (idx < fade) env = (float)idx / fade;
+            if (idx > total - fade) env = (float)(total - idx) / fade;
+            buf[i] = (int16_t)(sinf(2.0f * M_PI * freq * ((float)idx / sr)) * amplitude * env);
+        }
+        codec->WriteSamples(buf, count);
+        offset += count;
+    }
+}
+
+static void play_silence_ms(int ms) {
+    int samples = SAMPLE_RATE * ms / 1000;
+    int16_t silence[240] = {0};
+    for (int s = 0; s < samples; s += 240) {
+        int c = samples - s;
+        if (c > 240) c = 240;
+        codec->WriteSamples(silence, c);
+    }
+}
+
+// Play notification sound based on type. Must be called with output enabled.
+static void play_notification(int type) {
+    switch (type) {
+    case 1:  // thinking — soft double "boop" (low pitch, gentle)
+        play_tone(350.0f, 120, 2500.0f);
+        play_silence_ms(60);
+        play_tone(420.0f, 120, 2500.0f);
+        break;
+    case 2:  // tool_call — two quick beeps (mid pitch)
+        play_tone(520.0f, 100, 2500.0f);
+        play_silence_ms(50);
+        play_tone(520.0f, 100, 2500.0f);
+        break;
+    case 3:  // tool_result — gentle rising sweep "ding~"
+        play_sweep(500.0f, 800.0f, 200, 2500.0f);
+        break;
+    }
+}
+
 // ========== Chime (direct codec write) ==========
 static void play_chime() {
     codec->EnableOutput(true);
@@ -326,20 +412,36 @@ extern "C" void app_main(void) {
         audio_svc->PushOpusForDecode(data, len);
     });
 
-    // Wire: server JSON messages → LED state changes
+    // Wire: server JSON messages → LED state + notification sounds + processing lock
     ws->SetJsonCallback([](const char* json, size_t len) {
         // Copy to null-terminated buffer for strstr
-        char buf[128];
+        char buf[256];
         size_t copy_len = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
         memcpy(buf, json, copy_len);
         buf[copy_len] = '\0';
 
         if (strstr(buf, "\"tts_start\"")) {
+            pending_notification = 0;  // Cancel any pending notification
+            close_notif_output = true; // Tell main loop to close notification output
             led_set(0, 40, 40);  // Cyan = playing TTS
         } else if (strstr(buf, "\"tts_end\"")) {
             led_set(0, 20, 40);  // Blue-cyan = idle/connected
+            processing = false;  // Allow recording again
         } else if (strstr(buf, "\"stt\"")) {
             led_set(40, 40, 0);  // Yellow = got STT, waiting for LLM
+            processing = true;   // Lock recording during processing
+        } else if (strstr(buf, "\"status\"")) {
+            // NanoBot streaming status events
+            if (strstr(buf, "\"thinking\"")) {
+                led_set(40, 0, 40);  // Purple = LLM thinking
+                pending_notification = 1;
+            } else if (strstr(buf, "\"tool_call\"")) {
+                led_set(40, 20, 0);  // Orange = calling tool
+                pending_notification = 2;
+            } else if (strstr(buf, "\"tool_result\"")) {
+                led_set(20, 40, 0);  // Yellow-green = tool done
+                pending_notification = 3;
+            }
         }
     });
 
@@ -376,23 +478,68 @@ extern "C" void app_main(void) {
     bool btn_pressed = false;
     int loop_count = 0;
 
+    // Track whether notification output is open (to avoid open/close thrash)
+    bool notif_output_open = false;
+
     while (true) {
         bool btn = (gpio_get_level(BTN_PIN) == 0);  // Active low
 
         // Log button state every 2 seconds for first 20 seconds
         if (++loop_count % 100 == 0 && loop_count <= 1000) {
-            ESP_LOGI(TAG, "btn_gpio=%d pressed=%d recording=%d", !btn ? 1 : 0, btn_pressed, audio_svc->IsRecording());
+            ESP_LOGI(TAG, "btn_gpio=%d pressed=%d recording=%d processing=%d",
+                     !btn ? 1 : 0, btn_pressed, audio_svc->IsRecording(), (int)processing);
         }
 
+        // --- Close notification output if TTS is about to start ---
+        if (close_notif_output && notif_output_open) {
+            codec->EnableOutput(false);
+            notif_output_open = false;
+            close_notif_output = false;
+        }
+
+        // --- Play pending notification sounds ---
+        int notif = pending_notification;
+        if (notif > 0 && !close_notif_output) {
+            pending_notification = 0;
+            // Only play if not currently playing TTS (OutputTask handles that)
+            if (!audio_svc->IsRecording()) {
+                if (!notif_output_open) {
+                    codec->EnableOutput(true);
+                    set_speaker_mute(false);
+                    play_silence_ms(20);  // stabilize PA
+                    notif_output_open = true;
+                }
+                play_notification(notif);
+            }
+        } else if (notif_output_open && !processing) {
+            // No more notifications and not processing → close output
+            play_silence_ms(30);  // fade out
+            codec->EnableOutput(false);
+            notif_output_open = false;
+        }
+
+        // --- Button handling ---
         if (btn && !btn_pressed) {
-            // Button press → start recording
-            btn_pressed = true;
-            ESP_LOGI(TAG, "=== BUTTON PRESSED ===");
-            audio_svc->StartRecording();
-            led_set(60, 0, 0);  // Red = recording
-            // Notify server
-            const char* start = "{\"type\":\"record_start\"}";
-            ws->SendJson(start, strlen(start));
+            if (processing) {
+                // Ignore button press during processing
+                if (loop_count % 50 == 0) {
+                    ESP_LOGI(TAG, "Button ignored: processing in progress");
+                }
+            } else {
+                // Button press → start recording
+                btn_pressed = true;
+                // Close notification output if open
+                if (notif_output_open) {
+                    codec->EnableOutput(false);
+                    notif_output_open = false;
+                }
+                ESP_LOGI(TAG, "=== BUTTON PRESSED ===");
+                audio_svc->StartRecording();
+                led_set(60, 0, 0);  // Red = recording
+                // Notify server
+                const char* start = "{\"type\":\"record_start\"}";
+                ws->SendJson(start, strlen(start));
+            }
         } else if (!btn && btn_pressed) {
             // Button release → stop recording
             btn_pressed = false;

@@ -1,11 +1,15 @@
 """
 WebSocket-based Voice Assistant backend for Atom Echo (Opus transport).
 
-Protocol:
+Protocol (ESP32 ↔ this server):
   - Binary WebSocket messages = Opus-encoded audio frames
   - Text WebSocket messages = JSON control messages
   - ESP32 sends: {"type":"hello",...}, {"type":"record_start"}, {"type":"record_stop"}
   - Server sends: {"type":"tts_start"}, {"type":"tts_end"}, {"type":"stt","text":"..."}
+  - Server sends: {"type":"status","stage":"thinking|tool_call|tool_result","detail":"..."}
+
+LLM backend: NanoBot WebSocket streaming API at ws://192.168.31.165:18790/ws/chat
+  Events: thinking → tool_call → tool_result → ... → done → final
 """
 
 import asyncio
@@ -15,7 +19,9 @@ import io
 import json
 import logging
 import os
+import re
 import struct
+import time
 import wave
 
 import aiohttp
@@ -25,16 +31,19 @@ import yaml
 
 # --- Patch ctypes.util.find_library before importing opuslib ---
 # opuslib calls find_library('opus') at import time; on macOS with Homebrew
-# the system find_library doesn't search /opt/homebrew/lib
-_orig_find_library = ctypes.util.find_library
-def _patched_find_library(name):
-    result = _orig_find_library(name)
-    if result is None and name == 'opus':
-        for p in ['/opt/homebrew/lib/libopus.dylib', '/usr/local/lib/libopus.dylib']:
-            if os.path.exists(p):
-                return p
-    return result
-ctypes.util.find_library = _patched_find_library
+# the system find_library doesn't search /opt/homebrew/lib.
+# On Linux (Raspberry Pi) with libopus-dev installed, find_library works natively.
+import platform
+if platform.system() == "Darwin":
+    _orig_find_library = ctypes.util.find_library
+    def _patched_find_library(name):
+        result = _orig_find_library(name)
+        if result is None and name == 'opus':
+            for p in ['/opt/homebrew/lib/libopus.dylib', '/usr/local/lib/libopus.dylib']:
+                if os.path.exists(p):
+                    return p
+        return result
+    ctypes.util.find_library = _patched_find_library
 
 import opuslib
 
@@ -50,8 +59,23 @@ WS_PORT = 8765
 SILICONFLOW_API_KEY = secrets.get("siliconflow_api_key")
 SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 
-NANOBOT_URL = "http://192.168.31.165:18790/api/chat"
+# NanoBot streaming WebSocket endpoint
+# When running on the same host as NanoBot (e.g. Raspberry Pi), use localhost
+NANOBOT_HOST = os.environ.get("NANOBOT_HOST", "192.168.31.165")
+NANOBOT_WS_URL = f"ws://{NANOBOT_HOST}:18790/ws/chat"
 NANOBOT_SESSION = "iot:device1"
+
+# Prefix injected before every user message to constrain LLM output for TTS
+VOICE_OUTPUT_PREFIX = (
+    "[语音输出模式] 你的回复将通过语音合成朗读给用户。请严格遵守：\n"
+    "1. 纯口语化表达，不要使用任何Markdown格式（不要#、*、-、```等符号）\n"
+    "2. 不要使用列表、编号、表格，用自然的口语连接词代替（比如\"首先...然后...最后\"）\n"
+    "3. 不要输出URL链接、文件路径、代码片段\n"
+    "4. 数字用口语读法（比如\"一百二十三\"而不是\"123\"）\n"
+    "5. 简洁回复，控制在3-5句话以内，避免长篇大论\n"
+    "6. 不要使用括号注释（比如不要写\"CosyVoice（语音合成模型）\"）\n"
+    "\n用户说："
+)
 
 # Opus config (must match ESP32)
 OPUS_ENCODE_RATE = 16000   # mic recording rate for STT
@@ -132,9 +156,11 @@ class VoiceSession:
             logger.info(f">> {text}")
             await self.send_json({"type": "stt", "text": text})
 
-            # LLM
-            reply = await llm(text)
-            logger.info(f"<< {reply}")
+            # LLM via NanoBot streaming WebSocket
+            t0 = time.time()
+            reply = await self.llm_stream(text)
+            t_llm = time.time() - t0
+            logger.info(f"<< {reply} ({t_llm:.1f}s)")
 
             # TTS → Opus → stream to ESP32
             await self.tts_and_stream(reply)
@@ -143,6 +169,76 @@ class VoiceSession:
             logger.error(f"Process error: {e}", exc_info=True)
         finally:
             self.processing = False
+
+    async def llm_stream(self, text: str) -> str:
+        """Call NanoBot via WebSocket streaming API.
+        Forwards intermediate events (thinking, tool_call, tool_result) to ESP32
+        as status messages so the device can show progress on LED.
+        Returns the final LLM response text.
+        """
+        voiced_message = VOICE_OUTPUT_PREFIX + text
+        payload = json.dumps({"message": voiced_message, "session": NANOBOT_SESSION})
+        reply = ""
+
+        timeout = aiohttp.ClientTimeout(total=120)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.ws_connect(NANOBOT_WS_URL) as nanobot_ws:
+                    # Send the query
+                    await nanobot_ws.send_str(payload)
+
+                    # Process streaming events
+                    async for msg in nanobot_ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            event = json.loads(msg.data)
+                            evt_type = event.get("type")
+
+                            if evt_type == "thinking":
+                                iteration = event.get("iteration", 0)
+                                logger.info(f"  [thinking] iteration {iteration}")
+                                await self.send_json({
+                                    "type": "status",
+                                    "stage": "thinking",
+                                    "detail": f"iteration {iteration}",
+                                })
+
+                            elif evt_type == "tool_call":
+                                tool_name = event.get("name", "")
+                                logger.info(f"  [tool_call] {tool_name}")
+                                await self.send_json({
+                                    "type": "status",
+                                    "stage": "tool_call",
+                                    "detail": tool_name,
+                                })
+
+                            elif evt_type == "tool_result":
+                                tool_name = event.get("name", "")
+                                result_preview = event.get("result", "")[:100]
+                                logger.info(f"  [tool_result] {tool_name}: {result_preview}")
+                                await self.send_json({
+                                    "type": "status",
+                                    "stage": "tool_result",
+                                    "detail": tool_name,
+                                })
+
+                            elif evt_type == "final":
+                                reply = event.get("content", "").strip()
+                                break  # Terminal event
+
+                            elif evt_type == "done":
+                                # done arrives just before final; use final as authoritative
+                                pass
+
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            logger.error(f"NanoBot WS error/closed")
+                            break
+
+        except Exception as e:
+            logger.error(f"NanoBot WS error: {e}", exc_info=True)
+
+        if not reply:
+            reply = "抱歉，我没有得到回复。"
+        return clean_for_tts(reply)
 
     async def tts_and_stream(self, text: str):
         await self.send_json({"type": "tts_start"})
@@ -196,6 +292,32 @@ class VoiceSession:
 
 # --- Shared utilities ---
 
+def clean_for_tts(text: str) -> str:
+    """Clean LLM output for natural TTS reading."""
+    # Remove markdown headers
+    text = re.sub(r'#{1,6}\s*', '', text)
+    # Remove bold/italic markers
+    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
+    # Remove inline code backticks
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Remove code blocks
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # Remove markdown links, keep text: [text](url) → text
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    # Remove bare URLs
+    text = re.sub(r'https?://\S+', '', text)
+    # Remove list markers (-, *, numbered)
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\d+[.)]\s+', '', text, flags=re.MULTILINE)
+    # Remove excessive whitespace/newlines, normalize to single spaces
+    text = re.sub(r'\n{2,}', '。', text)  # paragraph breaks → period
+    text = re.sub(r'\n', '，', text)      # line breaks → comma
+    text = re.sub(r'\s{2,}', ' ', text)
+    # Remove remaining special chars that TTS might read literally
+    text = re.sub(r'[<>{}|\\~^]', '', text)
+    return text.strip()
+
+
 def pcm_to_wav(pcm_data: bytes, sample_rate: int) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, 'wb') as f:
@@ -226,23 +348,6 @@ async def stt(wav_data: bytes) -> str:
         except Exception as e:
             logger.error(f"STT exception: {e}")
     return ""
-
-
-async def llm(text: str) -> str:
-    payload = {"message": text, "session": NANOBOT_SESSION}
-    timeout = aiohttp.ClientTimeout(total=60)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        try:
-            async with session.post(NANOBOT_URL, json=payload) as resp:
-                if resp.status == 200:
-                    res = await resp.json()
-                    return res.get("response", "没有回复。")
-                else:
-                    body = await resp.text()
-                    logger.error(f"NanoBot {resp.status}: {body[:200]}")
-        except Exception as e:
-            logger.error(f"NanoBot error: {e}")
-    return "思考出错。"
 
 
 async def tts_to_pcm(text: str, target_rate: int) -> bytes:
