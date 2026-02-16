@@ -38,3 +38,15 @@ __pycache__/
 
 # Transcripts
 *.jsonl
+
+# Test scripts (contain hardcoded IPs)
+test_ws_chat*.py
+
+# Old development docs (contain sensitive info)
+DEVELOPMENT_LOG.md
+INSTRUCTIONS.md
+PLAN.md
+TECHNICAL_REFERENCE.md
+
+# ESPHome config (contains credentials)
+atom_echo.yaml

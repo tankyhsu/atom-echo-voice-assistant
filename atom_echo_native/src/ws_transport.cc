@@ -71,6 +71,7 @@ void WsTransport::EventHandler(void* arg, esp_event_base_t base, int32_t id, voi
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "Disconnected");
         self->connected_ = false;
+        if (self->on_disconnect_) self->on_disconnect_();
         break;
 
     case WEBSOCKET_EVENT_DATA:

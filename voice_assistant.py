@@ -8,7 +8,7 @@ Protocol (ESP32 ↔ this server):
   - Server sends: {"type":"tts_start"}, {"type":"tts_end"}, {"type":"stt","text":"..."}
   - Server sends: {"type":"status","stage":"thinking|tool_call|tool_result","detail":"..."}
 
-LLM backend: NanoBot WebSocket streaming API at ws://192.168.31.165:18790/ws/chat
+LLM backend: NanoBot WebSocket streaming API at ws://NANOBOT_HOST:18790/ws/chat
   Events: thinking → tool_call → tool_result → ... → done → final
 """
 
@@ -61,7 +61,7 @@ SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 
 # NanoBot streaming WebSocket endpoint
 # When running on the same host as NanoBot (e.g. Raspberry Pi), use localhost
-NANOBOT_HOST = os.environ.get("NANOBOT_HOST", "192.168.31.165")
+NANOBOT_HOST = os.environ.get("NANOBOT_HOST", "127.0.0.1")
 NANOBOT_WS_URL = f"ws://{NANOBOT_HOST}:18790/ws/chat"
 NANOBOT_SESSION = "iot:device1"
 
@@ -180,7 +180,12 @@ class VoiceSession:
         payload = json.dumps({"message": voiced_message, "session": NANOBOT_SESSION})
         reply = ""
 
-        timeout = aiohttp.ClientTimeout(total=120)
+        MAX_ITERATIONS = 60  # Safety limit (NanoBot max is 50)
+        MAX_LLM_TIME = 600  # 10 minutes — tool calls can be slow
+        iteration_count = 0
+        t_start = time.time()
+
+        timeout = aiohttp.ClientTimeout(total=MAX_LLM_TIME + 30)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.ws_connect(NANOBOT_WS_URL) as nanobot_ws:
@@ -189,17 +194,28 @@ class VoiceSession:
 
                     # Process streaming events
                     async for msg in nanobot_ws:
+                        # Safety: check time and iteration limits
+                        elapsed = time.time() - t_start
+                        if elapsed > MAX_LLM_TIME:
+                            logger.warning(f"LLM timeout after {elapsed:.0f}s, aborting")
+                            reply = "抱歉，处理时间太长了，请稍后再试。"
+                            break
+                        if iteration_count > MAX_ITERATIONS:
+                            logger.warning(f"LLM exceeded {MAX_ITERATIONS} iterations, aborting")
+                            reply = "抱歉，处理步骤太多了，请简化你的请求。"
+                            break
+
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             event = json.loads(msg.data)
                             evt_type = event.get("type")
 
                             if evt_type == "thinking":
-                                iteration = event.get("iteration", 0)
-                                logger.info(f"  [thinking] iteration {iteration}")
+                                iteration_count = event.get("iteration", iteration_count + 1)
+                                logger.info(f"  [thinking] iteration {iteration_count}")
                                 await self.send_json({
                                     "type": "status",
                                     "stage": "thinking",
-                                    "detail": f"iteration {iteration}",
+                                    "detail": f"iteration {iteration_count}",
                                 })
 
                             elif evt_type == "tool_call":
@@ -233,6 +249,9 @@ class VoiceSession:
                             logger.error(f"NanoBot WS error/closed")
                             break
 
+        except asyncio.TimeoutError:
+            logger.error("NanoBot WS connection timed out")
+            reply = "抱歉，处理超时了。"
         except Exception as e:
             logger.error(f"NanoBot WS error: {e}", exc_info=True)
 

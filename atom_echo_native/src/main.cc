@@ -53,13 +53,14 @@
 // WiFi networks (tried in order)
 struct WiFiCredential { const char* ssid; const char* password; };
 static const WiFiCredential wifi_list[] = {
-    {"oasis",  "0a5is402"},
-    {"laotie", "qty19541226"},
+    {"your_wifi_ssid",  "your_wifi_password"},
+    // Add more networks for automatic failover:
+    // {"backup_ssid", "backup_password"},
 };
 static int wifi_index = 0;
 static int wifi_retry = 0;
 #define WIFI_MAX_RETRY 3
-#define BACKEND_IP    "192.168.31.165"
+#define BACKEND_IP    "192.168.x.x"  // IP of machine running voice_assistant.py
 
 // WebSocket URI
 #define WS_URI "ws://" BACKEND_IP ":8765"
@@ -470,6 +471,14 @@ extern "C" void app_main(void) {
         }
     });
 
+    // Wire: WS disconnect → reset processing state so button works again
+    ws->SetDisconnectCallback([]() {
+        processing = false;
+        pending_notification = 0;
+        close_notif_output = false;
+        led_set(20, 20, 20);  // White = disconnected/reconnecting
+    });
+
     // Wire: encoded Opus from mic → send to server
     audio_svc->SetSendCallback([](const uint8_t* data, size_t len) {
         ws->SendAudio(data, len);
@@ -513,6 +522,15 @@ extern "C" void app_main(void) {
         if (++loop_count % 100 == 0 && loop_count <= 1000) {
             ESP_LOGI(TAG, "btn_gpio=%d pressed=%d recording=%d processing=%d",
                      !btn ? 1 : 0, btn_pressed, audio_svc->IsRecording(), (int)processing);
+        }
+
+        // --- Safety: reset processing if WS disconnected ---
+        if (processing && !ws->IsConnected()) {
+            ESP_LOGW(TAG, "WS disconnected while processing, resetting state");
+            processing = false;
+            pending_notification = 0;
+            close_notif_output = false;
+            led_set(0, 20, 40);
         }
 
         // --- Close notification output if TTS is about to start ---

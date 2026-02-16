@@ -1,0 +1,7 @@
+services:
+  voice-assistant:
+    build: .
+    network_mode: host
+    volumes:
+      - ./secrets.yaml:/app/secrets.yaml:ro
+    restart: unless-stopped

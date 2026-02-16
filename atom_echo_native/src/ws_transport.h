@@ -9,12 +9,14 @@ class WsTransport {
 public:
     using AudioCallback = std::function<void(const uint8_t* data, size_t len)>;
     using JsonCallback = std::function<void(const char* json, size_t len)>;
+    using DisconnectCallback = std::function<void()>;
 
     WsTransport();
     ~WsTransport();
 
     void SetAudioCallback(AudioCallback cb) { on_audio_ = cb; }
     void SetJsonCallback(JsonCallback cb) { on_json_ = cb; }
+    void SetDisconnectCallback(DisconnectCallback cb) { on_disconnect_ = cb; }
 
     bool Connect(const char* uri);
     void Disconnect();
@@ -29,5 +31,6 @@ private:
     esp_websocket_client_handle_t client_ = nullptr;
     AudioCallback on_audio_;
     JsonCallback on_json_;
+    DisconnectCallback on_disconnect_;
     bool connected_ = false;
 };
