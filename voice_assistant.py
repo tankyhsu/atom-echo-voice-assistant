@@ -150,6 +150,7 @@ class VoiceSession:
             text = await stt(wav_data)
             if not text:
                 logger.warning("STT returned empty")
+                await self.send_json({"type": "tts_end"})  # Reset ESP32 processing state
                 self.processing = False
                 return
 
@@ -167,6 +168,7 @@ class VoiceSession:
 
         except Exception as e:
             logger.error(f"Process error: {e}", exc_info=True)
+            await self.send_json({"type": "tts_end"})  # Reset ESP32 processing state
         finally:
             self.processing = False
 
