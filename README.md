@@ -292,9 +292,13 @@ sudo systemctl enable --now voice-assistant
 
 本项目的 STT 和 TTS 服务由 **[SiliconFlow 硅基流动](https://cloud.siliconflow.cn/i/vnNqBaFz)** 提供。SiliconFlow 提供高性能、低成本的 AI 推理服务，支持多种开源模型的即时调用。
 
-通过以下推广链接注册即可获得免费额度：
+通过以下推广链接或扫描二维码注册即可获得免费额度：
 
 **[https://cloud.siliconflow.cn/i/vnNqBaFz](https://cloud.siliconflow.cn/i/vnNqBaFz)**
+
+<a href="https://cloud.siliconflow.cn/i/vnNqBaFz" target="_blank">
+  <img src="assets/siliconflow_qr.png" alt="SiliconFlow 注册二维码" width="200">
+</a>
 
 SiliconFlow 的优势：
 - 高性能推理加速，响应速度快

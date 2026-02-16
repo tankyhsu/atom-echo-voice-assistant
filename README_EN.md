@@ -291,9 +291,13 @@ This project uses [SiliconFlow](https://cloud.siliconflow.cn/i/vnNqBaFz) AI infe
 
 The STT and TTS services in this project are powered by **[SiliconFlow](https://cloud.siliconflow.cn/i/vnNqBaFz)**. SiliconFlow provides high-performance, cost-effective AI inference services with instant access to a wide range of open-source models.
 
-Sign up with the referral link below to get free credits:
+Sign up with the referral link below or scan the QR code to get free credits:
 
 **[https://cloud.siliconflow.cn/i/vnNqBaFz](https://cloud.siliconflow.cn/i/vnNqBaFz)**
+
+<a href="https://cloud.siliconflow.cn/i/vnNqBaFz" target="_blank">
+  <img src="assets/siliconflow_qr.png" alt="SiliconFlow QR Code" width="200">
+</a>
 
 Why SiliconFlow:
 - High-performance inference acceleration with fast response times
