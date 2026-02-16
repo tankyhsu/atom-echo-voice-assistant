@@ -238,60 +238,55 @@ void AudioService::InputTask(void* arg) {
 }
 
 // ========== Output Task: PCM blocks → Speaker ==========
+// Codec output stays always-on. Muting is done via hardware amp shutdown pin
+// (~10ms) instead of esp_codec_dev_open/close (~50-100ms).
 void AudioService::OutputTask(void* arg) {
     auto* self = (AudioService*)arg;
-    bool output_active = false;
+    bool unmuted = false;
     int idle_ticks = 0;
-    int silence_written = 0;  // count silence blocks written during gaps
-    // Keep output open for 500ms after last data to avoid expensive codec reinit
-    const int MAX_IDLE_TICKS = 50;  // 50 * 10ms = 500ms
+    // Hardware amp mute is fast (~10ms), so we only need a short idle window
+    const int MAX_IDLE_TICKS = 10;  // 10 * 10ms = 100ms
 
     while (self->running_) {
         DecodedPcmBlock* block = nullptr;
         if (xQueueReceive(self->playback_queue_, &block, pdMS_TO_TICKS(10))) {
-            if (!output_active) {
-                self->codec_->EnableOutput(true);
-                output_active = true;
-                ESP_LOGI(TAG, "OutputTask: output opened");
-            }
-            if (idle_ticks > 0 && silence_written > 0) {
-                // We had a gap — log it
-                ESP_LOGW(TAG, "OutputTask: gap filled with %d silence blocks (%dms)",
-                         silence_written, silence_written * 10);
+            if (!unmuted) {
+                // Unmute amp via hardware GPIO (fast, ~10ms)
+                if (self->on_mute_) self->on_mute_(false);
+                unmuted = true;
+                ESP_LOGI(TAG, "OutputTask: amp unmuted");
             }
             idle_ticks = 0;
-            silence_written = 0;
             stat_played++;
             self->codec_->WriteSamples(block->samples, block->count);
             free(block);
-        } else if (output_active) {
-            // Queue empty — write silence to keep I2S DMA fed and avoid PA pop
+        } else if (unmuted) {
+            // Queue empty — write silence to keep I2S DMA fed
             int16_t silence[240] = {0};
             self->codec_->WriteSamples(silence, 240);
             idle_ticks++;
-            silence_written++;
             if (idle_ticks >= MAX_IDLE_TICKS) {
-                // Drain any remaining frames before closing
+                // Drain any remaining frames before muting
                 DecodedPcmBlock* drain = nullptr;
                 while (xQueueReceive(self->playback_queue_, &drain, 0) == pdTRUE) {
                     stat_played++;
                     self->codec_->WriteSamples(drain->samples, drain->count);
                     free(drain);
                 }
-                self->codec_->EnableOutput(false);
-                output_active = false;
+                // Mute amp via hardware GPIO (fast, ~10ms)
+                if (self->on_mute_) self->on_mute_(true);
+                unmuted = false;
                 idle_ticks = 0;
-                silence_written = 0;
                 stats_print();
                 stats_reset();
-                ESP_LOGI(TAG, "OutputTask: output closed after 500ms idle");
+                ESP_LOGI(TAG, "OutputTask: amp muted after 100ms idle");
             }
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
-    if (output_active) {
-        self->codec_->EnableOutput(false);
+    if (unmuted && self->on_mute_) {
+        self->on_mute_(true);
     }
     vTaskDelete(NULL);
 }

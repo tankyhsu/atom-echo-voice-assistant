@@ -26,11 +26,13 @@ struct OpusPacket {
 class AudioService {
 public:
     using SendCallback = std::function<void(const uint8_t* data, size_t len)>;
+    using MuteCallback = std::function<void(bool mute)>;
 
     AudioService(AudioCodec* codec);
     ~AudioService();
 
     void SetSendCallback(SendCallback cb) { on_send_ = cb; }
+    void SetMuteCallback(MuteCallback cb) { on_mute_ = cb; }
 
     bool Start(int decode_sample_rate = 24000);
     void Stop();
@@ -50,6 +52,7 @@ private:
 
     AudioCodec* codec_;
     SendCallback on_send_;
+    MuteCallback on_mute_;
 
     void* opus_encoder_ = nullptr;
     void* opus_decoder_ = nullptr;

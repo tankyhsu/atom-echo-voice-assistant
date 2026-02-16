@@ -424,8 +424,9 @@ extern "C" void app_main(void) {
     led_set(20, 20, 20);  // White = ready
     ESP_LOGI(TAG, "WiFi ready. Free heap: %lu", esp_get_free_heap_size());
 
-    // Unmute speaker for playback
-    set_speaker_mute(false);
+    // Keep codec output always enabled — muting is done via hardware amp pin
+    codec->EnableOutput(true);
+    set_speaker_mute(true);  // Start muted, OutputTask will unmute when playing
 
     // Audio service (Opus encode/decode pipeline)
     audio_svc = new AudioService(codec);
@@ -484,6 +485,11 @@ extern "C" void app_main(void) {
         ws->SendAudio(data, len);
     });
 
+    // Wire: hardware amp mute control (fast ~10ms vs 50-100ms codec open/close)
+    audio_svc->SetMuteCallback([](bool mute) {
+        set_speaker_mute(mute);
+    });
+
     // Start audio service
     audio_svc->Start(SAMPLE_RATE);
     ESP_LOGI(TAG, "Audio service started. Free heap: %lu", esp_get_free_heap_size());
@@ -535,7 +541,7 @@ extern "C" void app_main(void) {
 
         // --- Close notification output if TTS is about to start ---
         if (close_notif_output && notif_output_open) {
-            codec->EnableOutput(false);
+            set_speaker_mute(true);
             notif_output_open = false;
             close_notif_output = false;
         }
@@ -547,7 +553,6 @@ extern "C" void app_main(void) {
             // Only play if not currently playing TTS (OutputTask handles that)
             if (!audio_svc->IsRecording()) {
                 if (!notif_output_open) {
-                    codec->EnableOutput(true);
                     set_speaker_mute(false);
                     play_silence_ms(20);  // stabilize PA
                     notif_output_open = true;
@@ -555,9 +560,9 @@ extern "C" void app_main(void) {
                 play_notification(notif);
             }
         } else if (notif_output_open && !processing) {
-            // No more notifications and not processing → close output
+            // No more notifications and not processing → mute amp
             play_silence_ms(30);  // fade out
-            codec->EnableOutput(false);
+            set_speaker_mute(true);
             notif_output_open = false;
         }
 
@@ -571,9 +576,9 @@ extern "C" void app_main(void) {
             } else {
                 // Button press → start recording
                 btn_pressed = true;
-                // Close notification output if open
+                // Mute notification output if open
                 if (notif_output_open) {
-                    codec->EnableOutput(false);
+                    set_speaker_mute(true);
                     notif_output_open = false;
                 }
                 ESP_LOGI(TAG, "=== BUTTON PRESSED ===");
