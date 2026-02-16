@@ -1,3 +1,7 @@
+<p align="right">
+  <strong>中文</strong> | <a href="README_EN.md">English</a>
+</p>
+
 # Atom Echo 语音助手
 
 基于 M5Stack Atom Echo 的离线硬件 + 云端 AI 语音助手。按住按钮说话，松开后自动完成语音识别、LLM 推理、语音合成并播放回复。

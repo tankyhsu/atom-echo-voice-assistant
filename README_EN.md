@@ -1,3 +1,7 @@
+<p align="right">
+  <a href="README.md">中文</a> | <strong>English</strong>
+</p>
+
 # Atom Echo Voice Assistant
 
 A hardware voice assistant built on M5Stack Atom Echo with cloud AI backend. Press and hold the button to speak, release to automatically perform speech recognition, LLM inference, text-to-speech synthesis, and play the response.
