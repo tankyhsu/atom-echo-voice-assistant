@@ -321,11 +321,7 @@ static void play_chime() {
     set_speaker_mute(false);
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    const float freqs[] = {700.0f, 1000.0f, 1400.0f};
-    const int dur_ms[] = {200, 200, 250};
-    const int gap_ms = 120;
     const int sr = SAMPLE_RATE;
-    const uint8_t colors[][3] = {{60,0,0}, {0,60,0}, {0,0,60}};
 
     // Write initial silence to stabilize PA
     int16_t silence[240] = {0};
@@ -333,11 +329,21 @@ static void play_chime() {
         codec->WriteSamples(silence, 240);
     }
 
-    for (int n = 0; n < 3; n++) {
-        led_set(colors[n][0], colors[n][1], colors[n][2]);
+    // Gentle two-note chime: C5 (523Hz) → E5 (659Hz), soft and warm
+    // Low amplitude + long fade = pleasant startup sound
+    const float freqs[] = {523.25f, 659.25f};
+    const float amps[] = {2500.0f, 2000.0f};  // second note slightly softer
+    const int dur_ms[] = {250, 350};           // second note lingers
+    const int gap_ms = 80;
+
+    for (int n = 0; n < 2; n++) {
+        // Soft LED glow: warm amber → soft cyan
+        if (n == 0) led_set(30, 15, 0);
+        else        led_set(0, 20, 25);
 
         int total_samples = sr * dur_ms[n] / 1000;
-        int fade = total_samples / 6;
+        int fade_in = total_samples / 3;   // 33% fade in — very gradual attack
+        int fade_out = total_samples / 2;  // 50% fade out — long gentle tail
         int16_t buf[240];
         int offset = 0;
 
@@ -347,16 +353,16 @@ static void play_chime() {
             for (int i = 0; i < count; i++) {
                 int idx = offset + i;
                 float env = 1.0f;
-                if (idx < fade) env = (float)idx / fade;
-                if (idx > total_samples - fade) env = (float)(total_samples - idx) / fade;
-                buf[i] = (int16_t)(sinf(2.0f * M_PI * freqs[n] * ((float)idx / sr)) * 6000.0f * env);
+                if (idx < fade_in) env = (float)idx / fade_in;
+                if (idx > total_samples - fade_out) env = (float)(total_samples - idx) / fade_out;
+                buf[i] = (int16_t)(sinf(2.0f * M_PI * freqs[n] * ((float)idx / sr)) * amps[n] * env);
             }
             codec->WriteSamples(buf, count);
             offset += count;
         }
 
-        led_set(0, 0, 0);
-        if (n < 2) {
+        if (n == 0) {
+            // Brief gap between notes
             int gap_samples = sr * gap_ms / 1000;
             int16_t gap_buf[240] = {0};
             for (int s = 0; s < gap_samples; s += 240) {
@@ -367,8 +373,10 @@ static void play_chime() {
         }
     }
 
+    led_set(0, 0, 0);
+
     // Trailing silence
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < 10; i++) {
         codec->WriteSamples(silence, 240);
     }
 

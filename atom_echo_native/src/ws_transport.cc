@@ -15,6 +15,9 @@ bool WsTransport::Connect(const char* uri) {
     cfg.uri = uri;
     cfg.buffer_size = 8192;
     cfg.task_stack = 8192;
+    cfg.network_timeout_ms = 300000;     // 5 min — LLM tool calls can take minutes
+    cfg.reconnect_timeout_ms = 5000;     // reconnect after 5s if disconnected
+    cfg.pingpong_timeout_sec = 300;      // 5 min ping/pong timeout
 
     client_ = esp_websocket_client_init(&cfg);
     if (!client_) {

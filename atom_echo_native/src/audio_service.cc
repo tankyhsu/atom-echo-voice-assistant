@@ -254,7 +254,12 @@ void AudioService::OutputTask(void* arg) {
                 // Unmute amp via hardware GPIO (fast, ~10ms)
                 if (self->on_mute_) self->on_mute_(false);
                 unmuted = true;
-                ESP_LOGI(TAG, "OutputTask: amp unmuted");
+                // Write silence to let amp stabilize before real audio
+                int16_t lead_in[240] = {0};
+                for (int i = 0; i < 3; i++) {  // 3 * 240 samples @ 24kHz ≈ 30ms
+                    self->codec_->WriteSamples(lead_in, 240);
+                }
+                ESP_LOGI(TAG, "OutputTask: amp unmuted (30ms lead-in)");
             }
             idle_ticks = 0;
             stat_played++;

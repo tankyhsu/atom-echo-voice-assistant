@@ -98,6 +98,7 @@ class VoiceSession:
         self.recording = False
         self.pcm_buffer = bytearray()
         self.processing = False
+        self._heartbeat_task: asyncio.Task | None = None
 
     async def handle_message(self, msg: aiohttp.WSMessage):
         if msg.type == aiohttp.WSMsgType.BINARY:
@@ -136,12 +137,32 @@ class VoiceSession:
         except opuslib.OpusError as e:
             logger.warning(f"Opus decode error: {e}")
 
+    def _start_heartbeat(self):
+        """Start a background task that sends heartbeat every 15s."""
+        self._stop_heartbeat()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    def _stop_heartbeat(self):
+        """Cancel the heartbeat task if running."""
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+        self._heartbeat_task = None
+
+    async def _heartbeat_loop(self):
+        try:
+            while True:
+                await asyncio.sleep(15)
+                await self.send_json({"type": "heartbeat", "timestamp": time.time()})
+        except asyncio.CancelledError:
+            pass
+
     async def process_utterance(self):
         if len(self.pcm_buffer) < 3200:  # < 100ms
             logger.info("Audio too short, ignoring")
             return
 
         self.processing = True
+        self._start_heartbeat()
         try:
             # PCM buffer is 16kHz 16-bit mono
             wav_data = pcm_to_wav(self.pcm_buffer, OPUS_ENCODE_RATE)
@@ -170,6 +191,7 @@ class VoiceSession:
             logger.error(f"Process error: {e}", exc_info=True)
             await self.send_json({"type": "tts_end"})  # Reset ESP32 processing state
         finally:
+            self._stop_heartbeat()
             self.processing = False
 
     async def llm_stream(self, text: str) -> str:
